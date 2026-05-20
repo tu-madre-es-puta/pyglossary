@@ -19,6 +19,7 @@ def getGitVersion(gitDir: str) -> str:
 				gitDir,
 				"describe",
 				"--always",
+				"--tags",
 			],
 			stdout=subprocess.PIPE,
 		).communicate()

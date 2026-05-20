@@ -51,9 +51,9 @@ __all__ = [
 ]
 
 
-VERSION = "5.3.0"
+VERSION = "5.3.0-fork.1"
 
-homePage = "https://github.com/ilius/pyglossary"
+homePage = "https://github.com/ilius/pyglossary"  # upstream
 
 noColor = False
 

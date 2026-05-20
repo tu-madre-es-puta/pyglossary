@@ -1,4 +1,4 @@
-PyGlossary is a tool for working with dictionary databases (glossaries)
+PyGlossary (fork: +DudenNbof reader) is a tool for working with dictionary databases (glossaries)
 <b>Basic Usage:</b>
     <b>PyGI (Gtk3)</b> Interface:
         To open PyGlossary window:
