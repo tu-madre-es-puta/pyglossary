@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from pyglossary.option import BoolOption, IntOption
+from pyglossary.option import BoolOption, IntOption, StrOption
 
 from .reader import Reader
 
@@ -39,11 +39,14 @@ optionsProp: dict[str, Option] = {
 	"book_id": IntOption(
 		comment="Book ID to read (300 = Universalwörterbuch)",
 	),
+	"media_db": StrOption(
+		comment="Path to decrypted dbmedia.bdb for audio pronunciations",
+	),
 	"include_resources": BoolOption(
 		comment="Include images and external files as data entries",
 	),
 	"strip_audio_links": BoolOption(
-		comment="Remove sound: links from HTML definitions",
+		comment="Remove sound: links from HTML (auto-disabled when media_db is set)",
 	),
 	"strip_art_id": BoolOption(
 		comment="Remove <meta art-id> tags from HTML definitions",

@@ -4,8 +4,11 @@
 # Reads a pre-decrypted Duden SQLite database and yields entries
 # compatible with any PyGlossary writer (DSL, StarDict, MDict, etc.).
 #
-# The encrypted .nbof must be decrypted first using decrypt-duden.py.
+# The encrypted .nbof/.bdb must be decrypted first using decrypt-duden.py.
 # This reader operates only on standard, unencrypted SQLite databases.
+#
+# Optionally reads audio pronunciations from a decrypted dbmedia.bdb
+# (same BrockhausCodec encryption, table: tabDudenbibMedia).
 #
 # Schema reference: duden-reversed/database-schema-reference.md
 from __future__ import annotations
@@ -30,6 +33,10 @@ log = logging.getLogger("pyglossary")
 _re_sound_link = re.compile(
 	r'<a\b[^>]*\bclass="soundlink"[^>]*>.*?</a>',
 	re.DOTALL | re.IGNORECASE,
+)
+_re_sound_href = re.compile(
+	r'href="sound:([^"]+)"',
+	re.IGNORECASE,
 )
 _re_meta_art_id = re.compile(
 	r"<meta\b[^>]*\bart-id=[^>]*/?>",
@@ -58,6 +65,7 @@ class Reader:
 
 	# defaults for read-options (discovered via _-prefixed class attrs)
 	_book_id: int = 300
+	_media_db: str = ""
 	_include_resources: bool = True
 	_strip_audio_links: bool = True
 	_strip_art_id: bool = True
@@ -70,28 +78,27 @@ class Reader:
 		self._filename = ""
 		self._con: sqlite3.Connection | None = None
 		self._cur: sqlite3.Cursor | None = None
+		self._media_con: sqlite3.Connection | None = None
+		self._media_cur: sqlite3.Cursor | None = None
+		self._media_index: dict[str, bool] | None = None
 		self._entry_count: int = 0
 
 	def open(
 		self,
 		filename: str,
-		book_id: int = 300,
-		include_resources: bool = True,
-		strip_audio_links: bool = True,
-		strip_art_id: bool = True,
 	) -> None:
 		from sqlite3 import connect
 
 		self._filename = filename
-		self._book_id = book_id
-		self._include_resources = include_resources
-		self._strip_audio_links = strip_audio_links
-		self._strip_art_id = strip_art_id
 
 		self._con = connect(filename)
 		self._cur = self._con.cursor()
 
 		self._glos.setDefaultDefiFormat("h")
+
+		# Open media database if provided
+		if self._media_db:
+			self._open_media_db(connect)
 
 		# Read book metadata
 		self._cur.execute(
@@ -131,6 +138,43 @@ class Reader:
 			)
 			self._entry_count = self._cur.fetchone()[0]
 
+	def _open_media_db(self, connect: type) -> None:
+		"""Open the media database and build a case-insensitive filename index.
+
+		The media DB stores filenames in lowercase (e.g. id4115778_303232826.mp3)
+		while the dictionary HTML references them in uppercase (ID4115778_...).
+		We build a lowercase→original mapping for O(1) lookup.
+		"""
+		try:
+			self._media_con = connect(self._media_db)
+			self._media_cur = self._media_con.cursor()
+
+			# Build case-insensitive index
+			self._media_cur.execute(
+				"SELECT filename FROM tabDudenbibMedia"
+			)
+			self._media_index = {
+				row[0].lower(): True for row in self._media_cur.fetchall()
+			}
+			media_count = len(self._media_index)
+			log.info(
+				f"Media DB opened: {media_count:,} audio files indexed"
+			)
+
+			# Auto-disable audio link stripping — we want to keep them
+			# since the audio files will be available as resources
+			if self._strip_audio_links:
+				log.info(
+					"media_db set: auto-disabling strip_audio_links"
+				)
+				self._strip_audio_links = False
+
+		except Exception as e:
+			log.error(f"Failed to open media DB {self._media_db!r}: {e}")
+			self._media_con = None
+			self._media_cur = None
+			self._media_index = None
+
 	def __len__(self) -> int:
 		return self._entry_count
 
@@ -142,6 +186,13 @@ class Reader:
 		if self._strip_audio_links:
 			result = _re_sound_link.sub("", result)
 			result = _re_speaker_img.sub("", result)
+		elif self._media_con is not None:
+			# Rewrite sound: protocol to plain filename for portability
+			result = re.sub(
+				r'href="sound:([^"]+)"',
+				lambda m: f'href="{m.group(1).lower()}"',
+				result,
+			)
 		return result
 
 	def _iter_resources(self) -> Iterator[EntryType]:
@@ -164,6 +215,31 @@ class Reader:
 			if fname and data:
 				yield glos.newDataEntry(fname, data)
 
+	def _iter_media(self) -> Iterator[EntryType]:
+		"""Yield DataEntry objects for audio pronunciations from media DB.
+
+		Reads from tabDudenbibMedia(filename, media) — 134,417 MP3 files.
+		Each file is yielded as a DataEntry with the original (lowercase)
+		filename from the media DB.
+		"""
+		if self._media_cur is None:
+			return
+		glos = self._glos
+
+		self._media_cur.execute(
+			"SELECT filename, media FROM tabDudenbibMedia"
+		)
+		count = 0
+		for row in self._media_cur.fetchall():
+			fname, data = row[0], row[1]
+			if fname and data:
+				yield glos.newDataEntry(fname, data)
+				count += 1
+				if count % 10000 == 0:
+					log.info(f"  ... {count:,} audio files yielded")
+
+		log.info(f"Media DB: {count:,} audio files total")
+
 	def __iter__(self) -> Iterator[EntryType]:
 		if self._cur is None:
 			raise ValueError("cur is None")
@@ -172,6 +248,10 @@ class Reader:
 		# Yield embedded resources first (images, PDFs)
 		if self._include_resources:
 			yield from self._iter_resources()
+
+		# Yield audio resources from media DB
+		if self._media_con is not None:
+			yield from self._iter_media()
 
 		# Main dictionary entries
 		self._cur.execute(
@@ -204,6 +284,16 @@ class Reader:
 		try:
 			if self._con:
 				self._con.close()
+		except Exception:
+			pass
+		try:
+			if self._media_cur:
+				self._media_cur.close()
+		except Exception:
+			pass
+		try:
+			if self._media_con:
+				self._media_con.close()
 		except Exception:
 			pass
 		self._clear()
